@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Ego-Centric Network Editor</title>
+  <style>
+    /* Overall styling */
+    body {
+      font-family: Arial, sans-serif;
+      background: #f2f2f2;
+      margin: 0;
+      padding: 0;
+    }
+    #container {
+      display: flex;
+      flex-wrap: wrap;
+      margin: 20px;
+    }
+    #editor, #visualizer {
+      background: #fff;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 10px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    #editor {
+      flex: 1;
+      min-width: 300px;
+    }
+    #visualizer {
+      flex: 2;
+      min-width: 400px;
+      position: relative;
+    }
+    /* Table/grid styling */
+    table {
+      border-collapse: collapse;
+      margin-bottom: 10px;
+      width: 100%;
+    }
+    table, th, td {
+      border: 1px solid #ccc;
+    }
+    th, td {
+      width: 60px;
+      height: 35px;
+      text-align: center;
+    }
+    input[type="text"] {
+      width: 100%;
+      border: none;
+      padding: 5px;
+      box-sizing: border-box;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      background-color: #e6f7ff;
+    }
+    button {
+      padding: 8px 12px;
+      margin: 5px 0;
+      background-color: #1f77b4;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #155d8b;
+    }
+    /* Node edit controls */
+    #nodeControls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(255,255,255,0.9);
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    #nodeControls input[type="color"],
+    #nodeControls input[type="range"] {
+      margin-left: 5px;
+    }
+  </style>
+  <!-- We use D3 v6 for the network visualization -->
+  <script src="https://d3js.org/d3.v6.min.js"></script>
+</head>
+<body>
+  <div id="container">
+    <!-- The Grid Editor -->
+    <div id="editor">
+      <h2>Network Grid Editor</h2>
+      <!-- Button to add a new node (i.e. a new row & column) -->
+      <button id="addRowCol">Add Node</button>
+      <!-- The grid (a table whose first row and first column are header inputs) -->
+      <table id="grid"></table>
+      <!-- Buttons for actions -->
+      <button id="submitGrid">Submit & Visualize</button>
+      <button id="exportCSV">Export CSV</button>
+    </div>
+
+    <!-- The Network Visualizer -->
+    <div id="visualizer">
+      <h2>Network Visualizer</h2>
+      <svg id="networkSvg" width="600" height="600"></svg>
+      <!-- Controls for changing a node’s color and size (appear when you click a node) -->
+      <div id="nodeControls" style="display:none;">
+         <h3>Edit Node</h3>
+         <label for="nodeColor">Color:</label>
+         <input type="color" id="nodeColor" value="#1f77b4">
+         <br>
+         <label for="nodeSize">Size:</label>
+         <input type="range" id="nodeSize" min="5" max="50" value="15">
+         <br>
+         <button id="updateNode">Update Node</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* Global variables */
+    let gridSize = 3; // starting with 3 nodes
+    let selectedNode = null;
+    // Save node-specific properties so that if you edit the grid later the changes persist.
+    let nodeProperties = {}; // e.g., { 0: {color: "#ff0000", size: 20}, ... }
+
+    // When the page loads, build the initial grid and attach event listeners.
+    document.addEventListener('DOMContentLoaded', function() {
+      generateGrid(gridSize);
+      document.getElementById('addRowCol').addEventListener('click', addNode);
+      document.getElementById('submitGrid').addEventListener('click', submitGrid);
+      document.getElementById('exportCSV').addEventListener('click', exportCSV);
+      document.getElementById('updateNode').addEventListener('click', function(){
+         if (selectedNode) {
+            let newColor = document.getElementById('nodeColor').value;
+            let newSize = +document.getElementById('nodeSize').value;
+            nodeProperties[selectedNode.id] = { color: newColor, size: newSize };
+            updateVisualization();
+            document.getElementById('nodeControls').style.display = 'none';
+         }
+      });
+      // Render the initial (empty) visualization.
+      updateVisualization();
+    });
+
+    // Generates the grid table with a header row and header column.
+    function generateGrid(n) {
+      gridSize = n;
+      let table = document.getElementById('grid');
+      table.innerHTML = '';
+      // Create header row (first row): first cell is empty
+      let headerRow = document.createElement('tr');
+      let corner = document.createElement('th');
+      headerRow.appendChild(corner);
+      for (let j = 0; j < n; j++) {
+          let th = document.createElement('th');
+          let input = document.createElement('input');
+          input.type = 'text';
+          input.placeholder = 'Name';
+          input.className = 'node-name';
+          input.setAttribute('data-index', j);
+          input.addEventListener('input', syncHeaders);
+          th.appendChild(input);
+          headerRow.appendChild(th);
+      }
+      table.appendChild(headerRow);
+
+      // Create a row for each node.
+      for (let i = 0; i < n; i++) {
+          let row = document.createElement('tr');
+          // First cell in each row: node name input.
+          let th = document.createElement('th');
+          let input = document.createElement('input');
+          input.type = 'text';
+          input.placeholder = 'Name';
+          input.className = 'node-name';
+          input.setAttribute('data-index', i);
+          input.addEventListener('input', syncHeaders);
+          th.appendChild(input);
+          row.appendChild(th);
+          // Then cells for relationship data.
+          for (let j = 0; j < n; j++) {
+              let td = document.createElement('td');
+              let cellInput = document.createElement('input');
+              cellInput.type = 'text';
+              cellInput.className = 'cell-input';
+              cellInput.setAttribute('data-row', i);
+              cellInput.setAttribute('data-col', j);
+              // For a cell that represents self-relationship, disable editing and fill with 0.
+              if (i === j) {
+                  cellInput.value = "0";
+                  cellInput.disabled = true;
+              }
+              cellInput.addEventListener('input', updateVisualizationFromGrid);
+              td.appendChild(cellInput);
+              row.appendChild(td);
+          }
+          table.appendChild(row);
+      }
+    }
+
+    // Synchronize the header inputs: when a name is entered in the top header or the left header,
+    // update the matching header so that both are the same.
+    function syncHeaders(e) {
+      let index = this.getAttribute('data-index');
+      let inputs = document.querySelectorAll('.node-name[data-index="' + index + '"]');
+      inputs.forEach(input => {
+         if (input !== this) {
+             input.value = this.value;
+         }
+      });
+      updateVisualization();
+    }
+
+    // Adds a new node by adding a new header (row & column) to the grid.
+    function addNode() {
+      gridSize++;
+      let table = document.getElementById('grid');
+      // Append a new header cell (for the new column) in the first row.
+      let headerRow = table.rows[0];
+      let newTh = document.createElement('th');
+      let newInput = document.createElement('input');
+      newInput.type = 'text';
+      newInput.placeholder = 'Name';
+      newInput.className = 'node-name';
+      newInput.setAttribute('data-index', gridSize - 1);
+      newInput.addEventListener('input', syncHeaders);
+      newTh.appendChild(newInput);
+      headerRow.appendChild(newTh);
+
+      // Create a new row for the new node.
+      let newRow = document.createElement('tr');
+      // The new row header cell.
+      let newRowHeader = document.createElement('th');
+      let newRowInput = document.createElement('input');
+      newRowInput.type = 'text';
+      newRowInput.placeholder = 'Name';
+      newRowInput.className = 'node-name';
+      newRowInput.setAttribute('data-index', gridSize - 1);
+      newRowInput.addEventListener('input', syncHeaders);
+      newRowHeader.appendChild(newRowInput);
+      newRow.appendChild(newRowHeader);
+      // Create data cells for the new row.
+      for (let j = 0; j < gridSize; j++) {
+          let td = document.createElement('td');
+          let cellInput = document.createElement('input');
+          cellInput.type = 'text';
+          cellInput.className = 'cell-input';
+          cellInput.setAttribute('data-row', gridSize - 1);
+          cellInput.setAttribute('data-col', j);
+          if ((gridSize - 1) === j) {
+              cellInput.value = "0";
+              cellInput.disabled = true;
+          }
+          cellInput.addEventListener('input', updateVisualizationFromGrid);
+          td.appendChild(cellInput);
+          newRow.appendChild(td);
+      }
+      table.appendChild(newRow);
+
+      // For every existing row (except the header row), add a new cell for the new column.
+      for (let i = 1; i < table.rows.length - 1; i++) {
+          let row = table.rows[i];
+          let td = document.createElement('td');
+          let cellInput = document.createElement('input');
+          cellInput.type = 'text';
+          cellInput.className = 'cell-input';
+          // Adjust row number: the first row is header so subtract 1.
+          cellInput.setAttribute('data-row', i - 1);
+          cellInput.setAttribute('data-col', gridSize - 1);
+          if ((i - 1) === (gridSize - 1)) {
+              cellInput.value = "0";
+              cellInput.disabled = true;
+          }
+          cellInput.addEventListener('input', updateVisualizationFromGrid);
+          td.appendChild(cellInput);
+          row.appendChild(td);
+      }
+      updateVisualization();
+    }
+
+    // On “submit” click, fill in any blank cell with “0” then update the visualization.
+    function submitGrid() {
+      let cellInputs = document.querySelectorAll('.cell-input');
+      cellInputs.forEach(input => {
+         if (input.value.trim() === "") {
+              input.value = "0";
+         }
+      });
+      updateVisualization();
+    }
+
+    // This function is called when a grid cell is edited.
+    function updateVisualizationFromGrid() {
+      updateVisualization();
+    }
+
+    // Reads the current grid and header values, builds arrays of nodes and links,
+    // and then calls drawNetwork.
+    function updateVisualization() {
+      // Build the nodes using the header row (top row) inputs.
+      let nodes = [];
+      let headerInputs = document.querySelectorAll('tr:first-child .node-name');
+      headerInputs.forEach((input, i) => {
+         let name = input.value.trim() || "Node " + (i + 1);
+         let defaultColor = "#1f77b4";
+         let defaultSize = 15;
+         if (nodeProperties[i]) {
+            defaultColor = nodeProperties[i].color;
+            defaultSize = nodeProperties[i].size;
+         }
+         nodes.push({ id: i, name: name, color: defaultColor, size: defaultSize });
+      });
+
+      // Build the links by scanning every grid cell. (Only cells with a “1” indicate a relationship.)
+      let links = [];
+      let cellInputs = document.querySelectorAll('.cell-input');
+      cellInputs.forEach(input => {
+         let value = input.value.trim();
+         let row = parseInt(input.getAttribute('data-row'));
+         let col = parseInt(input.getAttribute('data-col'));
+         // Skip the diagonal cells (self-relationships)
+         if (row !== col && value === "1") {
+              links.push({ source: row, target: col });
+         }
+      });
+
+      drawNetwork(nodes, links);
+    }
+
+    // Uses D3 to render a force-directed network in the SVG.
+    function drawNetwork(nodes, links) {
+      const svg = d3.select("#networkSvg");
+      const width = +svg.attr("width");
+      const height = +svg.attr("height");
+
+      // Remove any existing drawing.
+      svg.selectAll("*").remove();
+
+      // Set up the force simulation.
+      const simulation = d3.forceSimulation(nodes)
+          .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+          .force("charge", d3.forceManyBody().strength(-300))
+          .force("center", d3.forceCenter(width / 2, height / 2));
+
+      // Draw links (edges).
+      const link = svg.append("g")
+          .attr("class", "links")
+          .selectAll("line")
+          .data(links)
+          .enter().append("line")
+          .attr("stroke", "#999")
+          .attr("stroke-width", 2);
+
+      // Draw nodes.
+      const node = svg.append("g")
+          .attr("class", "nodes")
+          .selectAll("circle")
+          .data(nodes)
+          .enter().append("circle")
+          .attr("r", d => d.size)
+          .attr("fill", d => d.color)
+          .call(d3.drag()
+              .on("start", dragstarted)
+              .on("drag", dragged)
+              .on("end", dragended))
+          .on("click", nodeClicked);
+
+      // Add text labels.
+      const label = svg.append("g")
+          .attr("class", "labels")
+          .selectAll("text")
+          .data(nodes)
+          .enter().append("text")
+          .attr("dy", -10)
+          .attr("text-anchor", "middle")
+          .text(d => d.name)
+          .attr("font-size", "12px")
+          .attr("fill", "#333");
+
+      simulation.on("tick", () => {
+          link.attr("x1", d => d.source.x)
+              .attr("y1", d => d.source.y)
+              .attr("x2", d => d.target.x)
+              .attr("y2", d => d.target.y);
+
+          node.attr("cx", d => d.x)
+              .attr("cy", d => d.y);
+
+          label.attr("x", d => d.x)
+               .attr("y", d => d.y);
+      });
+
+      // Drag event functions.
+      function dragstarted(event, d) {
+          if (!event.active) simulation.alphaTarget(0.3).restart();
+          d.fx = d.x;
+          d.fy = d.y;
+      }
+      function dragged(event, d) {
+          d.fx = event.x;
+          d.fy = event.y;
+      }
+      function dragended(event, d) {
+          if (!event.active) simulation.alphaTarget(0);
+          d.fx = null;
+          d.fy = null;
+      }
+
+      // When a node is clicked, show the editing controls.
+      function nodeClicked(event, d) {
+          selectedNode = d;
+          let controls = document.getElementById('nodeControls');
+          controls.style.display = 'block';
+          document.getElementById('nodeColor').value = d.color;
+          document.getElementById('nodeSize').value = d.size;
+      }
+    }
+
+    // Export the current grid as a CSV file.
+    function exportCSV() {
+      let csv = "";
+      let table = document.getElementById("grid");
+      // Loop through each table row.
+      for (let i = 0; i < table.rows.length; i++) {
+        let row = table.rows[i];
+        let rowData = [];
+        // For each cell in the row, grab the value of the contained input (if any).
+        for (let j = 0; j < row.cells.length; j++) {
+          let cell = row.cells[j];
+          let input = cell.querySelector("input");
+          // Wrap values in quotes to handle commas.
+          if (input) {
+            rowData.push('"' + input.value.trim() + '"');
+          } else {
+            rowData.push('""');
+          }
+        }
+        csv += rowData.join(",") + "\n";
+      }
+
+      // Create a Blob from the CSV data and trigger a download.
+      let blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      let url = URL.createObjectURL(blob);
+      let a = document.createElement("a");
+      a.href = url;
+      a.download = "ego_network.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  </script>
+</body>
+</html>
